@@ -1,7 +1,7 @@
 {
   "name": "shop-marketplace-backend",
   "version": "1.0.0",
-  "description": "Express + Firestore API for Shop Marketplace (JWT auth)",
+  "description": "Ceylon Craft Collective — Express + Firestore API (JWT auth)",
   "type": "module",
   "main": "src/server.js",
   "scripts": {

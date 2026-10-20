@@ -8,7 +8,7 @@ const router = Router();
 const PLATFORM = '_platform'; // fulfilment key for items with no seller (sold by the marketplace itself)
 
 const orderNumber = () =>
-  `HLK-${Date.now().toString(36).toUpperCase()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+  `CCC-${Date.now().toString(36).toUpperCase()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
 
 /**
  * Overall order status from each seller's fulfilment status:

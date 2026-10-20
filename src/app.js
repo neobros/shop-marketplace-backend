@@ -31,7 +31,7 @@ app.use(cors({ origin: origins, credentials: true }));
 app.use(express.json({ limit: '2mb' }));
 app.use(morgan(process.env.VERCEL ? 'tiny' : 'dev'));
 
-app.get('/', (_req, res) => res.json({ name: 'Handmade in Sri Lanka API', health: '/api/health' }));
+app.get('/', (_req, res) => res.json({ name: 'Ceylon Craft Collective API', health: '/api/health' }));
 app.get('/api/health', (_req, res) => res.json({ ok: true, time: new Date().toISOString() }));
 app.use('/api/auth', authRoutes);
 app.use('/api/categories', categoryRoutes);

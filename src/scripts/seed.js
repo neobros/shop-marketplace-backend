@@ -1,5 +1,5 @@
 /**
- * Seeds Firestore for "Handmade in Sri Lanka": admin, artisan shops (sellers), craft categories,
+ * Seeds Firestore for "Ceylon Craft Collective": admin, artisan shops (sellers), craft categories,
  * products (LKR), banners, customers, reviews and demo orders.
  *   npm run seed            -> add data (skips users that already exist)
  *   npm run seed -- --fresh -> wipe shop collections + demo users first
@@ -200,7 +200,7 @@ async function run() {
   // Admin
   const adminEmail = (process.env.ADMIN_EMAIL || 'admin@shop.com').toLowerCase();
   const admin = await upsertUser({
-    name: 'Marketplace Admin', email: adminEmail, role: 'admin', demo: false,
+    name: 'Ceylon Craft Collective Admin', email: adminEmail, role: 'admin', demo: false,
     password: await bcrypt.hash(process.env.ADMIN_PASSWORD || 'Admin@123', 10),
   });
   console.log(`  admin ${admin.existed ? 'exists' : 'created'}: ${adminEmail}`);
@@ -260,7 +260,7 @@ async function run() {
         `${name} is handcrafted by the artisans of ${shop.name}, ${shop.district}. ` +
         'Because every piece is made by hand, small variations in colour and finish make each one unique.\n\n' +
         'Carefully packed and shipped island-wide. International gifting available on request.',
-      sku: `HLK-${String(1000 + i)}`, tags: [catKey, shop.district.toLowerCase(), 'handmade'],
+      sku: `CCC-${String(1000 + i)}`, tags: [catKey, shop.district.toLowerCase(), 'handmade'],
       colors: [], sizes: [], materials: '', dimensions: '', featured: false, isNew: false, active: true,
       sellerId: shop.id, shopName: shop.name, shopSlug: shop.slug, district: shop.district, sellerActive: true,
       rating: Math.round((myReviews.reduce((s, r) => s + r[0], 0) / myReviews.length) * 10) / 10,
@@ -297,7 +297,7 @@ async function run() {
     const sellerIds = [...new Set(lines.map((l) => l.sellerId))];
     if (status !== 'cancelled') lines.forEach((l) => (sold[l.productId] = (sold[l.productId] || 0) + l.quantity));
     await col.orders().add({
-      orderNumber: `HLK-DEMO-${String(i + 1).padStart(4, '0')}`,
+      orderNumber: `CCC-DEMO-${String(i + 1).padStart(4, '0')}`,
       userId: cu.id, customer: { name: cu.name, email: cu.email, phone: cu.phone }, items: lines, sellerIds,
       fulfilment: Object.fromEntries(sellerIds.map((id) => [id, { status, at }])),
       shippingAddress: { fullName: cu.name, phone: cu.phone, address: cu.address.address, city: cu.district, district: cu.district, postalCode: cu.address.postalCode },

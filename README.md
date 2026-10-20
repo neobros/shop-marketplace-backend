@@ -1,6 +1,6 @@
 # shop-marketplace-backend
 
-Node.js + Express REST API for **Handmade in Sri Lanka**, a multi-vendor marketplace where Sri Lankan artisans and small creative businesses sell handmade products.
+Node.js + Express REST API for **Ceylon Craft Collective**, a multi-vendor marketplace where Sri Lankan artisans and small creative businesses sell handmade products.
 
 - **Database:** Firebase **Firestore**.
 - **Auth:** the API's own **JWT + bcrypt**. It does not use Firebase Authentication.
@@ -113,3 +113,7 @@ The demo images come from Wikimedia Commons under the licences listed below, plu
 | (Ananga Bahirawa) Traditional masks of Ambalangoda, Sri Lanka - Tharaka Nirmal Photography.png | Henda Hewa Tharaka Nirmal | CC BY-SA 4.0 |
 | Weaver of Sri Lanka.JPG | Peter van der Sluijs | CC BY-SA 3.0 |
 | Dumbara Rata.jpg | Mahiru Fernando | CC BY-SA 4.0 |
+
+
+
+
