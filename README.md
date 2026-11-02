@@ -20,7 +20,7 @@ cp .env.example .env          # first time only — then set JWT_SECRET and MONG
 2. Seed the demo data and start the API. Indexes are created automatically on the first connection.
 
 ```bash
-npm run seed -- --fresh   # categories, 8 artisan shops, 41 products, banners, reviews, orders
+npm run seed:fresh        # categories, 8 artisan shops, 41 products, banners, reviews, orders
 npm run dev               # http://localhost:5000
 ```
 
@@ -34,11 +34,13 @@ npm run dev               # http://localhost:5000
 ### Removing the demo data
 ```bash
 npm run db:clear                              # preview: shows what would be deleted, deletes nothing
-npm run db:clear -- --yes                     # delete only the demo data created by `npm run seed`
-npm run db:clear -- --all --yes               # delete EVERYTHING except admin accounts (clean start)
-npm run db:clear -- --all --keep-categories --yes   # same, but keep the craft categories
+npm run db:clear:demo                         # delete only the demo data created by `npm run seed`
+npm run db:clear:all                          # delete EVERYTHING except admin accounts (clean start)
+npm run db:clear:all-keep-categories          # same, but keep the craft categories
 ```
-Admin accounts are never deleted. Demo-only mode also removes the products, orders and reviews of the demo users. Real accounts and anything created through the website are kept.
+Admin accounts are never deleted. Demo-only mode also removes the products, orders and reviews of the demo users. It also recognises demo data from older seeds that has no `demo` marker, by matching the seed's category slugs and banner titles. A category is kept if it still has real products.
+
+A plain `npm run seed` refuses to run when the database already has categories or products, so you can't get duplicates by seeding twice. Use `npm run seed:fresh` to replace the demo data. (Use these named scripts in PowerShell: it drops the `--` in `npm run seed -- --fresh`, so the flag never reaches the script.) Real accounts and anything created through the website are kept.
 
 ## Privacy: artisans' contact details
 Customers must order through the marketplace, so the API never sends an artisan's phone number or full name to the public site. Only the first name is shown. Admins still see full details in the admin panel.

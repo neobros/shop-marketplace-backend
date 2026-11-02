@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { col, escapeRegex, findById, oid, toDoc, toDocs } from '../config/db.js';
+import { col, searchRegex, findById, oid, toDoc, toDocs } from '../config/db.js';
 import { adminOnly, protect } from '../middleware/auth.js';
 import { ApiError, asyncHandler, now, pick, publicUser, required } from '../utils/helpers.js';
 import { findByEmail, newUser } from './auth.js';
@@ -14,7 +14,7 @@ router.get(
     const filter = {};
     if (req.query.role) filter.role = String(req.query.role);
     if (req.query.q) {
-      const re = { $regex: escapeRegex(String(req.query.q)), $options: 'i' };
+      const re = searchRegex(req.query.q);
       filter.$or = [{ name: re }, { email: re }];
     }
     const [users, spend] = await Promise.all([
