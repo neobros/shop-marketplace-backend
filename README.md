@@ -31,6 +31,20 @@ npm run dev               # http://localhost:5000
 | Seller (pending application) | jaffnapalmyrah@demo.lk | Seller@123 |
 | Customer | ayesha@demo.lk | Customer@123 |
 
+### Removing the demo data
+```bash
+npm run db:clear                              # preview: shows what would be deleted, deletes nothing
+npm run db:clear -- --yes                     # delete only the demo data created by `npm run seed`
+npm run db:clear -- --all --yes               # delete EVERYTHING except admin accounts (clean start)
+npm run db:clear -- --all --keep-categories --yes   # same, but keep the craft categories
+```
+Admin accounts are never deleted. Demo-only mode also removes the products, orders and reviews of the demo users. Real accounts and anything created through the website are kept.
+
+## Privacy: artisans' contact details
+Customers must order through the marketplace, so the API never sends an artisan's phone number or full name to the public site. Only the first name is shown. Admins still see full details in the admin panel.
+
+When a seller saves shop text (name, tagline, story) or product text (name, descriptions, tags…), any phone numbers, emails, links and WhatsApp/Instagram/Facebook handles are replaced with `[hidden]`. See `hideContacts` in `src/utils/helpers.js`. Text written by admins is not changed.
+
 ## Deploy to Vercel
 The app lives in `src/app.js`. `api/index.js` exposes it as a serverless function, and `vercel.json` sends every route to it. The MongoDB connection is cached between requests. For local development, `src/server.js` still runs `app.listen`.
 
