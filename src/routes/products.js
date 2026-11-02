@@ -1,7 +1,8 @@
 import { Router } from 'express';
 import { col, escapeRegex, findById, oid, toDoc, toDocs } from '../config/db.js';
 import { protect } from '../middleware/auth.js';
-import { ApiError, asyncHandler, now, pick, required, slugify } from '../utils/helpers.js';
+import { ApiError, asyncHandler, hideContactsIn, now, pick, required, slugify } from '../utils/helpers.js';
+import { firstName } from './sellers.js';
 
 const router = Router();
 const FIELDS = [
@@ -27,6 +28,8 @@ const normalize = (body, isAdmin) => {
     if (typeof data[k] === 'string') data[k] = data[k].split(',').map((s) => s.trim()).filter(Boolean);
   }
   if (data.price !== undefined && !(data.price >= 0)) throw new ApiError(400, 'Invalid price');
+  // Sellers may not publish phone numbers, emails or links — customers must order through the marketplace
+  if (!isAdmin) hideContactsIn(data, ['name', 'description', 'shortDescription', 'materials', 'dimensions', 'tags', 'colors', 'sizes']);
   return data;
 };
 
@@ -122,7 +125,7 @@ router.get(
       product.sellerId ? findById(col.users(), product.sellerId) : null,
     ]);
     const seller = sellerDoc?.shop
-      ? { id: sellerDoc.id, ownerName: sellerDoc.name, ...pick(sellerDoc.shop, ['name', 'slug', 'tagline', 'district', 'logo', 'craft', 'approvedAt']) }
+      ? { id: sellerDoc.id, ownerName: firstName(sellerDoc.name), ...pick(sellerDoc.shop, ['name', 'slug', 'tagline', 'district', 'logo', 'craft', 'approvedAt']) }
       : null;
 
     res.json({ product: { ...product, category }, seller, reviews: toDocs(reviews), related: toDocs(related) });
@@ -148,7 +151,7 @@ router.post(
       active: true,
       ...body,
       ...(await shopInfo(sellerId)),
-      slug: `${slugify(req.body.name)}-${Date.now().toString(36)}`,
+      slug: `${slugify(body.name.replace('[hidden]', ''))}-${Date.now().toString(36)}`,
       rating: 0,
       numReviews: 0,
       sold: 0,

@@ -206,7 +206,7 @@ async function run() {
   // Categories
   const cat = {};
   for (const [i, { key, ...data }] of CATEGORIES.entries()) {
-    const ref = await add(col.categories(), { ...data, slug: slugify(data.name), active: true, order: i, createdAt: iso(), updatedAt: iso() });
+    const ref = await add(col.categories(), { ...data, demo: true, slug: slugify(data.name), active: true, order: i, createdAt: iso(), updatedAt: iso() });
     cat[key] = ref.id;
   }
   console.log(`  ${CATEGORIES.length} categories`);
@@ -252,6 +252,7 @@ async function run() {
     const created = iso(i * 2.5);
     const myReviews = REVIEWS.slice(i % 4, (i % 4) + 1 + (i % 3));
     const data = {
+      demo: true,
       name, slug: slugify(name), categoryId: cat[catKey], price, comparePrice, stock, images,
       shortDescription: `Handmade by ${shop.name} in ${shop.district}.`,
       description:
@@ -268,12 +269,12 @@ async function run() {
     products.push({ id: ref.id, ...data });
     for (const [k, [rating, comment]] of myReviews.entries()) {
       const cu = customers[(i + k) % customers.length];
-      await add(col.reviews(), { productId: ref.id, sellerId: shop.id, userId: cu.id, userName: cu.name, rating, comment, createdAt: iso(i + k) });
+      await add(col.reviews(), { demo: true, productId: ref.id, sellerId: shop.id, userId: cu.id, userName: cu.name, rating, comment, createdAt: iso(i + k) });
     }
   }
   console.log(`  ${products.length} products with reviews`);
 
-  for (const b of BANNERS) await add(col.banners(), { textColor: '', active: true, ...b, createdAt: iso() });
+  for (const b of BANNERS) await add(col.banners(), { demo: true, textColor: '', active: true, ...b, createdAt: iso() });
   console.log(`  ${BANNERS.length} banners`);
 
   // Demo orders (some contain items from several artisans)
@@ -295,6 +296,7 @@ async function run() {
     const sellerIds = [...new Set(lines.map((l) => l.sellerId))];
     if (status !== 'cancelled') lines.forEach((l) => (sold[l.productId] = (sold[l.productId] || 0) + l.quantity));
     await add(col.orders(), {
+      demo: true,
       orderNumber: `CCC-DEMO-${String(i + 1).padStart(4, '0')}`,
       userId: cu.id, customer: { name: cu.name, email: cu.email, phone: cu.phone }, items: lines, sellerIds,
       fulfilment: Object.fromEntries(sellerIds.map((id) => [id, { status, at }])),
