@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { col, escapeRegex, findById, oid, toDoc, toDocs } from '../config/db.js';
+import { col, searchRegex, findById, oid, toDoc, toDocs } from '../config/db.js';
 import { FREE_SHIPPING_OVER, ORDER_STATUSES, PAYMENT_METHODS, SHIPPING_FLAT } from '../config/shop.js';
 import { adminOnly, protect } from '../middleware/auth.js';
 import { ApiError, asyncHandler, now } from '../utils/helpers.js';
@@ -151,7 +151,7 @@ router.get(
     const filter = {};
     if (req.query.status) filter.status = String(req.query.status);
     if (req.query.q) {
-      const re = { $regex: escapeRegex(String(req.query.q)), $options: 'i' };
+      const re = searchRegex(req.query.q);
       filter.$or = [{ orderNumber: re }, { 'customer.name': re }, { 'customer.email': re }];
     }
     res.json({ orders: toDocs(await col.orders().find(filter).sort({ createdAt: -1 }).toArray()) });

@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { col, escapeRegex, findById, oid, toDoc, toDocs } from '../config/db.js';
+import { col, searchRegex, findById, oid, toDoc, toDocs } from '../config/db.js';
 import { DISTRICTS, SHOP_STATUSES } from '../config/shop.js';
 import { adminOnly, protect } from '../middleware/auth.js';
 import { ApiError, asyncHandler, hideContactsIn, now, pick, publicUser, required, slugify } from '../utils/helpers.js';
@@ -81,7 +81,7 @@ router.get(
     const filter = { role: 'seller', 'shop.status': 'approved' };
     if (req.query.district) filter['shop.district'] = String(req.query.district);
     if (req.query.q) {
-      const re = { $regex: escapeRegex(String(req.query.q)), $options: 'i' };
+      const re = searchRegex(req.query.q);
       filter.$or = [{ 'shop.name': re }, { 'shop.tagline': re }, { 'shop.craft': re }, { 'shop.district': re }, { name: re }];
     }
     const [sellers, stats] = await Promise.all([
