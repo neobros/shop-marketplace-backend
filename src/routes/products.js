@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { col, escapeRegex, findById, oid, toDoc, toDocs } from '../config/db.js';
+import { col, searchRegex, findById, oid, toDoc, toDocs } from '../config/db.js';
 import { protect } from '../middleware/auth.js';
 import { ApiError, asyncHandler, hideContactsIn, now, pick, required, slugify } from '../utils/helpers.js';
 import { firstName } from './sellers.js';
@@ -81,7 +81,7 @@ router.get(
     if (seller) and.push({ $or: [{ sellerId: String(seller) }, { shopSlug: String(seller) }] });
     if (district) and.push({ district: String(district) });
     if (q) {
-      const re = { $regex: escapeRegex(String(q)), $options: 'i' };
+      const re = searchRegex(q);
       and.push({ $or: [{ name: re }, { shopName: re }, { description: re }, { district: re }, { tags: re }] });
     }
     if (minPrice || maxPrice) {

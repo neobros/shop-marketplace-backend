@@ -105,4 +105,18 @@ export const findById = async (collection, id, options) => {
 /** Escape user input for use inside a RegExp. */
 export const escapeRegex = (s = '') => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
+// Letters that may be typed with or without an accent ("decor" should find "Décor" and vice versa)
+const ACCENTS = {
+  a: 'aàáâãäå', e: 'eèéêë', i: 'iìíîï', o: 'oòóôõö', u: 'uùúûü', c: 'cç', n: 'nñ', y: 'yýÿ',
+};
+const BASE = Object.fromEntries(Object.entries(ACCENTS).flatMap(([base, all]) => [...all].map((ch) => [ch, base])));
+
+/** Case- and accent-insensitive Mongo regex filter for a search term. */
+export const searchRegex = (term = '') => {
+  const pattern = [...String(term).toLowerCase()]
+    .map((ch) => (BASE[ch] ? `[${ACCENTS[BASE[ch]]}]` : escapeRegex(ch)))
+    .join('');
+  return { $regex: pattern, $options: 'i' };
+};
+
 export { ObjectId };

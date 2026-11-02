@@ -8,7 +8,11 @@
     "dev": "node --watch src/server.js",
     "start": "node src/server.js",
     "seed": "node src/scripts/seed.js",
-    "db:clear": "node src/scripts/clear.js"
+    "seed:fresh": "node src/scripts/seed.js --fresh",
+    "db:clear": "node src/scripts/clear.js",
+    "db:clear:demo": "node src/scripts/clear.js --yes",
+    "db:clear:all": "node src/scripts/clear.js --all --yes",
+    "db:clear:all-keep-categories": "node src/scripts/clear.js --all --keep-categories --yes"
   },
   "engines": {
     "node": ">=18"

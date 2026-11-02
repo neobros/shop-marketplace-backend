@@ -7,6 +7,6 @@ const PORT = process.env.PORT || 5000;
 connectDB()
   .then(() => app.listen(PORT, () => console.log(`API running on http://localhost:${PORT} (MongoDB connected)`)))
   .catch((err) => {
-    console.error('✖ Could not connect to MongoDB:', err.message);
+    console.error('ERROR: Could not connect to MongoDB:', err.message);
     process.exit(1);
   });
