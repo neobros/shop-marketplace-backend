@@ -1,5 +1,5 @@
 import jwt from 'jsonwebtoken';
-import { col, docData } from '../config/firebase.js';
+import { col, findById } from '../config/db.js';
 import { ApiError, asyncHandler, publicUser } from '../utils/helpers.js';
 
 const readToken = (req) => {
@@ -16,7 +16,7 @@ export const protect = asyncHandler(async (req, _res, next) => {
   } catch {
     throw new ApiError(401, 'Not authorized, token invalid or expired');
   }
-  const user = docData(await col.users().doc(payload.id).get());
+  const user = await findById(col.users(), payload.id);
   if (!user) throw new ApiError(401, 'User no longer exists');
   if (user.blocked) throw new ApiError(403, 'Your account has been blocked');
   req.user = publicUser(user);
@@ -29,7 +29,7 @@ export const optionalAuth = asyncHandler(async (req, _res, next) => {
   if (token) {
     try {
       const payload = jwt.verify(token, process.env.JWT_SECRET);
-      const user = docData(await col.users().doc(payload.id).get());
+      const user = await findById(col.users(), payload.id);
       if (user && !user.blocked) req.user = publicUser(user);
     } catch {
       /* ignore */

@@ -1,9 +1,8 @@
 import { Router } from 'express';
-import bcrypt from 'bcryptjs';
-import { col, docData, snapData } from '../config/firebase.js';
+import { col, escapeRegex, findById, oid, toDoc, toDocs } from '../config/db.js';
 import { adminOnly, protect } from '../middleware/auth.js';
 import { ApiError, asyncHandler, now, pick, publicUser, required } from '../utils/helpers.js';
-import { findByEmail } from './auth.js';
+import { findByEmail, newUser } from './auth.js';
 
 // Admin-only user management
 const router = Router();
@@ -12,21 +11,29 @@ router.use(protect, adminOnly);
 router.get(
   '/',
   asyncHandler(async (req, res) => {
-    const [users, orders] = await Promise.all([
-      col.users().get().then(snapData),
-      col.orders().select('userId', 'total', 'status').get().then(snapData),
-    ]);
-    let list = users.map((u) => {
-      const mine = orders.filter((o) => o.userId === u.id && o.status !== 'cancelled');
-      return { ...publicUser(u), orderCount: mine.length, totalSpent: mine.reduce((s, o) => s + o.total, 0) };
-    });
+    const filter = {};
+    if (req.query.role) filter.role = String(req.query.role);
     if (req.query.q) {
-      const t = req.query.q.toLowerCase();
-      list = list.filter((u) => u.name?.toLowerCase().includes(t) || u.email?.toLowerCase().includes(t));
+      const re = { $regex: escapeRegex(String(req.query.q)), $options: 'i' };
+      filter.$or = [{ name: re }, { email: re }];
     }
-    if (req.query.role) list = list.filter((u) => u.role === req.query.role);
-    list.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
-    res.json({ users: list });
+    const [users, spend] = await Promise.all([
+      col.users().find(filter, { projection: { password: 0 } }).sort({ createdAt: -1 }).toArray(),
+      col.orders()
+        .aggregate([
+          { $match: { status: { $ne: 'cancelled' } } },
+          { $group: { _id: '$userId', orderCount: { $sum: 1 }, totalSpent: { $sum: '$total' } } },
+        ])
+        .toArray(),
+    ]);
+    const spendOf = Object.fromEntries(spend.map((s) => [s._id, s]));
+    res.json({
+      users: toDocs(users).map((u) => ({
+        ...publicUser(u),
+        orderCount: spendOf[u.id]?.orderCount || 0,
+        totalSpent: spendOf[u.id]?.totalSpent || 0,
+      })),
+    });
   })
 );
 
@@ -37,29 +44,22 @@ router.post(
     required(req.body, ['name', 'email', 'password']);
     const email = req.body.email.toLowerCase().trim();
     if (await findByEmail(email)) throw new ApiError(409, 'Email is already registered');
-    const user = {
+    const user = await newUser({
       name: req.body.name,
       email,
-      password: await bcrypt.hash(req.body.password, 10),
+      password: req.body.password,
       role: req.body.role === 'admin' ? 'admin' : 'customer',
       phone: req.body.phone || '',
-      avatar: '',
-      address: {},
-      wishlist: [],
-      blocked: false,
-      createdAt: now(),
-      updatedAt: now(),
-    };
-    const ref = await col.users().add(user);
-    res.status(201).json({ user: publicUser({ id: ref.id, ...user }) });
+    });
+    const { insertedId } = await col.users().insertOne(user);
+    res.status(201).json({ user: publicUser(toDoc({ _id: insertedId, ...user })) });
   })
 );
 
 router.put(
   '/:id',
   asyncHandler(async (req, res) => {
-    const ref = col.users().doc(req.params.id);
-    const target = docData(await ref.get());
+    const target = await findById(col.users(), req.params.id);
     if (!target) throw new ApiError(404, 'User not found');
     if (req.params.id === req.user.id && (req.body.role === 'customer' || req.body.blocked))
       throw new ApiError(400, "You can't demote or block yourself");
@@ -67,8 +67,8 @@ router.put(
       throw new ApiError(400, 'Manage seller accounts from the Sellers page');
     const updates = { ...pick(req.body, ['name', 'phone', 'role', 'blocked']), updatedAt: now() };
     if (updates.role && !['admin', 'customer'].includes(updates.role)) throw new ApiError(400, 'Invalid role');
-    await ref.update(updates);
-    res.json({ user: publicUser(docData(await ref.get())) });
+    await col.users().updateOne({ _id: oid(target.id) }, { $set: updates });
+    res.json({ user: publicUser(await findById(col.users(), target.id)) });
   })
 );
 
@@ -77,9 +77,8 @@ router.delete(
   asyncHandler(async (req, res) => {
     if (req.params.id === req.user.id) throw new ApiError(400, "You can't delete yourself");
     // Hide a deleted seller's products (orders keep their own copy of the item details).
-    const products = await col.products().where('sellerId', '==', req.params.id).get();
-    await Promise.all(products.docs.map((d) => d.ref.update({ sellerActive: false, active: false })));
-    await col.users().doc(req.params.id).delete();
+    await col.products().updateMany({ sellerId: req.params.id }, { $set: { sellerActive: false, active: false } });
+    await col.users().deleteOne({ _id: oid(req.params.id) });
     res.json({ message: 'User deleted' });
   })
 );

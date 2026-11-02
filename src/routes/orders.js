@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { col, db, docData, snapData } from '../config/firebase.js';
+import { col, escapeRegex, findById, oid, toDoc, toDocs } from '../config/db.js';
 import { FREE_SHIPPING_OVER, ORDER_STATUSES, PAYMENT_METHODS, SHIPPING_FLAT } from '../config/shop.js';
 import { adminOnly, protect } from '../middleware/auth.js';
 import { ApiError, asyncHandler, now } from '../utils/helpers.js';
@@ -23,10 +23,22 @@ export function deriveStatus(fulfilment) {
   return 'pending';
 }
 
+/** Give stock back (order cancelled, or a failed checkout rolling back its reservations). */
+async function releaseStock(qtyByProduct) {
+  await Promise.all(
+    Object.entries(qtyByProduct).map(([id, qty]) =>
+      col.products().updateOne({ _id: oid(id) }, [
+        { $set: { stock: { $add: ['$stock', qty] }, sold: { $max: [0, { $subtract: [{ $ifNull: ['$sold', 0] }, qty] }] } } },
+      ])
+    )
+  );
+}
+
 /**
  * POST /api/orders
  * body: { items: [{ productId, quantity, color?, size? }], shippingAddress, paymentMethod: cod|bank, note? }
- * Prices are recalculated from the DB; stock is checked and decremented atomically.
+ * Prices come from the DB. Stock is reserved with conditional atomic updates ($inc only when enough
+ * stock is left), and rolled back if any line fails — safe without multi-document transactions.
  */
 router.post(
   '/',
@@ -39,72 +51,85 @@ router.post(
     if (!a.fullName || !a.address || !a.city || !a.district || !a.phone)
       throw new ApiError(400, 'Shipping address is incomplete');
 
-    const order = await db.runTransaction(async (tx) => {
-      // The same product can appear on several lines (different size/colour) — read each once.
-      const ids = [...new Set(items.map((i) => String(i.productId)))];
-      const refs = Object.fromEntries(ids.map((id) => [id, col.products().doc(id)]));
-      const docs = Object.fromEntries(await Promise.all(ids.map(async (id) => [id, await tx.get(refs[id])])));
-      const qtyByProduct = {};
+    // The same product can appear on several lines (different size/colour) — load each once.
+    const ids = [...new Set(items.map((i) => String(i.productId)))];
+    const oids = ids.map(oid);
+    if (oids.some((x) => !x)) throw new ApiError(400, 'A product in your cart no longer exists');
+    const products = Object.fromEntries(
+      toDocs(await col.products().find({ _id: { $in: oids } }).toArray()).map((p) => [p.id, p])
+    );
 
-      const lines = items.map((item) => {
-        const doc = docs[String(item.productId)];
-        const qty = Math.max(1, parseInt(item.quantity, 10) || 1);
-        if (!doc.exists) throw new ApiError(400, 'A product in your cart no longer exists');
-        const p = doc.data();
-        if (p.active === false || p.sellerActive === false) throw new ApiError(400, `${p.name} is no longer available`);
-        if (p.sellerId && p.sellerId === req.user.id) throw new ApiError(400, "You can't buy your own product");
-        qtyByProduct[doc.id] = (qtyByProduct[doc.id] || 0) + qty;
-        if ((p.stock ?? 0) < qtyByProduct[doc.id]) throw new ApiError(400, `Only ${p.stock} left of ${p.name}`);
-        return {
-          productId: doc.id,
-          name: p.name,
-          image: p.images?.[0] || '',
-          price: p.price,
-          quantity: qty,
-          color: item.color || '',
-          size: item.size || '',
-          sellerId: p.sellerId || '',
-          shopName: p.shopName || '',
-          shopSlug: p.shopSlug || '',
-        };
-      });
-
-      Object.entries(qtyByProduct).forEach(([id, qty]) => {
-        const p = docs[id].data();
-        tx.update(refs[id], { stock: p.stock - qty, sold: (p.sold || 0) + qty });
-      });
-
-      const sellerIds = [...new Set(lines.map((l) => l.sellerId).filter(Boolean))];
-      const fulfilment = Object.fromEntries(
-        [...new Set(lines.map((l) => l.sellerId || PLATFORM))].map((k) => [k, { status: 'pending', at: now() }])
-      );
-      const subtotal = lines.reduce((s, l) => s + l.price * l.quantity, 0);
-      const shipping = subtotal >= FREE_SHIPPING_OVER ? 0 : SHIPPING_FLAT;
-      const data = {
-        orderNumber: orderNumber(),
-        userId: req.user.id,
-        customer: { name: req.user.name, email: req.user.email, phone: a.phone },
-        items: lines,
-        sellerIds,
-        fulfilment,
-        shippingAddress: a,
-        paymentMethod,
-        paymentStatus: 'unpaid',
-        note,
-        subtotal,
-        shipping,
-        total: subtotal + shipping,
-        status: 'pending',
-        statusHistory: [{ status: 'pending', at: now() }],
-        createdAt: now(),
-        updatedAt: now(),
+    const qtyByProduct = {};
+    const lines = items.map((item) => {
+      const p = products[String(item.productId)];
+      const qty = Math.max(1, parseInt(item.quantity, 10) || 1);
+      if (!p) throw new ApiError(400, 'A product in your cart no longer exists');
+      if (p.active === false || p.sellerActive === false) throw new ApiError(400, `${p.name} is no longer available`);
+      if (p.sellerId && p.sellerId === req.user.id) throw new ApiError(400, "You can't buy your own product");
+      qtyByProduct[p.id] = (qtyByProduct[p.id] || 0) + qty;
+      if ((p.stock ?? 0) < qtyByProduct[p.id]) throw new ApiError(400, `Only ${p.stock} left of ${p.name}`);
+      return {
+        productId: p.id,
+        name: p.name,
+        image: p.images?.[0] || '',
+        price: p.price,
+        quantity: qty,
+        color: item.color || '',
+        size: item.size || '',
+        sellerId: p.sellerId || '',
+        shopName: p.shopName || '',
+        shopSlug: p.shopSlug || '',
       };
-      const orderRef = col.orders().doc();
-      tx.set(orderRef, data);
-      return { id: orderRef.id, ...data };
     });
 
-    res.status(201).json({ order });
+    // Reserve stock atomically
+    const reserved = {};
+    for (const [id, qty] of Object.entries(qtyByProduct)) {
+      const { modifiedCount } = await col.products().updateOne(
+        { _id: oid(id), stock: { $gte: qty }, active: { $ne: false }, sellerActive: { $ne: false } },
+        { $inc: { stock: -qty, sold: qty } }
+      );
+      if (!modifiedCount) {
+        await releaseStock(reserved);
+        const fresh = await findById(col.products(), id);
+        throw new ApiError(400, fresh ? `Only ${fresh.stock} left of ${fresh.name}` : 'A product in your cart is no longer available');
+      }
+      reserved[id] = qty;
+    }
+
+    const sellerIds = [...new Set(lines.map((l) => l.sellerId).filter(Boolean))];
+    const fulfilment = Object.fromEntries(
+      [...new Set(lines.map((l) => l.sellerId || PLATFORM))].map((k) => [k, { status: 'pending', at: now() }])
+    );
+    const subtotal = lines.reduce((s, l) => s + l.price * l.quantity, 0);
+    const shipping = subtotal >= FREE_SHIPPING_OVER ? 0 : SHIPPING_FLAT;
+    const data = {
+      orderNumber: orderNumber(),
+      userId: req.user.id,
+      customer: { name: req.user.name, email: req.user.email, phone: a.phone },
+      items: lines,
+      sellerIds,
+      fulfilment,
+      shippingAddress: a,
+      paymentMethod,
+      paymentStatus: 'unpaid',
+      note,
+      subtotal,
+      shipping,
+      total: subtotal + shipping,
+      status: 'pending',
+      statusHistory: [{ status: 'pending', at: now() }],
+      createdAt: now(),
+      updatedAt: now(),
+    };
+
+    try {
+      const { insertedId } = await col.orders().insertOne(data);
+      res.status(201).json({ order: toDoc({ _id: insertedId, ...data }) });
+    } catch (e) {
+      await releaseStock(reserved);
+      throw e;
+    }
   })
 );
 
@@ -112,10 +137,8 @@ router.get(
   '/mine',
   protect,
   asyncHandler(async (req, res) => {
-    const orders = snapData(await col.orders().where('userId', '==', req.user.id).get()).sort((a, b) =>
-      b.createdAt.localeCompare(a.createdAt)
-    );
-    res.json({ orders });
+    const orders = await col.orders().find({ userId: req.user.id }).sort({ createdAt: -1 }).toArray();
+    res.json({ orders: toDocs(orders) });
   })
 );
 
@@ -125,16 +148,13 @@ router.get(
   protect,
   adminOnly,
   asyncHandler(async (req, res) => {
-    let orders = snapData(await col.orders().get());
-    if (req.query.status) orders = orders.filter((o) => o.status === req.query.status);
+    const filter = {};
+    if (req.query.status) filter.status = String(req.query.status);
     if (req.query.q) {
-      const t = req.query.q.toLowerCase();
-      orders = orders.filter((o) =>
-        [o.orderNumber, o.customer?.name, o.customer?.email].some((v) => v?.toLowerCase().includes(t))
-      );
+      const re = { $regex: escapeRegex(String(req.query.q)), $options: 'i' };
+      filter.$or = [{ orderNumber: re }, { 'customer.name': re }, { 'customer.email': re }];
     }
-    orders.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-    res.json({ orders });
+    res.json({ orders: toDocs(await col.orders().find(filter).sort({ createdAt: -1 }).toArray()) });
   })
 );
 
@@ -142,7 +162,7 @@ router.get(
   '/:id',
   protect,
   asyncHandler(async (req, res) => {
-    const order = docData(await col.orders().doc(req.params.id).get());
+    const order = await findById(col.orders(), req.params.id);
     if (!order) throw new ApiError(404, 'Order not found');
     if (order.userId !== req.user.id && req.user.role !== 'admin') throw new ApiError(403, 'Not your order');
     res.json({ order });
@@ -154,13 +174,12 @@ router.put(
   '/:id/cancel',
   protect,
   asyncHandler(async (req, res) => {
-    const ref = col.orders().doc(req.params.id);
-    const order = docData(await ref.get());
+    const order = await findById(col.orders(), req.params.id);
     if (!order) throw new ApiError(404, 'Order not found');
     if (order.userId !== req.user.id && req.user.role !== 'admin') throw new ApiError(403, 'Not your order');
     if (order.status !== 'pending') throw new ApiError(400, 'Only pending orders can be cancelled');
-    await setStatus(ref, order, 'cancelled');
-    res.json({ order: docData(await ref.get()) });
+    await setStatus(order, 'cancelled');
+    res.json({ order: await findById(col.orders(), order.id) });
   })
 );
 
@@ -170,44 +189,37 @@ router.put(
   protect,
   adminOnly,
   asyncHandler(async (req, res) => {
-    const ref = col.orders().doc(req.params.id);
-    const order = docData(await ref.get());
+    const order = await findById(col.orders(), req.params.id);
     if (!order) throw new ApiError(404, 'Order not found');
     const { status, paymentStatus } = req.body;
     if (status && !ORDER_STATUSES.includes(status)) throw new ApiError(400, 'Invalid status');
     if (paymentStatus && !['paid', 'unpaid'].includes(paymentStatus)) throw new ApiError(400, 'Invalid payment status');
     if (order.status === 'cancelled' && status && status !== 'cancelled') throw new ApiError(400, 'Cancelled orders cannot be reopened');
-    if (status && status !== order.status) await setStatus(ref, order, status);
-    if (paymentStatus) await ref.update({ paymentStatus, updatedAt: now() });
-    res.json({ order: docData(await ref.get()) });
+    if (status && status !== order.status) await setStatus(order, status);
+    if (paymentStatus) await col.orders().updateOne({ _id: oid(order.id) }, { $set: { paymentStatus, updatedAt: now() } });
+    res.json({ order: await findById(col.orders(), order.id) });
   })
 );
 
-export async function setStatus(ref, order, status) {
-  await db.runTransaction(async (tx) => {
-    // Restore stock when an order becomes cancelled.
-    if (status === 'cancelled' && order.status !== 'cancelled') {
-      const qty = {};
-      order.items.forEach((i) => (qty[i.productId] = (qty[i.productId] || 0) + i.quantity));
-      const pDocs = await Promise.all(Object.keys(qty).map((id) => tx.get(col.products().doc(id))));
-      pDocs.forEach((d) => {
-        if (!d.exists) return;
-        const p = d.data();
-        tx.update(d.ref, { stock: (p.stock || 0) + qty[d.id], sold: Math.max(0, (p.sold || 0) - qty[d.id]) });
-      });
-    }
-    const fulfilment = Object.fromEntries(
-      Object.keys(order.fulfilment || { [PLATFORM]: 1 }).map((k) => [k, { status, at: now() }])
-    );
-    const updates = {
-      status,
-      fulfilment,
-      statusHistory: [...(order.statusHistory || []), { status, at: now() }],
-      updatedAt: now(),
-    };
-    if (status === 'delivered' && order.paymentMethod === 'cod') updates.paymentStatus = 'paid';
-    tx.update(ref, updates);
-  });
+/**
+ * Set the overall status (and every seller's fulfilment status). The update only applies while the
+ * order is not already cancelled, so stock can never be restored twice.
+ */
+export async function setStatus(order, status) {
+  const fulfilment = Object.fromEntries(
+    Object.keys(order.fulfilment || { [PLATFORM]: 1 }).map((k) => [k, { status, at: now() }])
+  );
+  const $set = { status, fulfilment, updatedAt: now() };
+  if (status === 'delivered' && order.paymentMethod === 'cod') $set.paymentStatus = 'paid';
+  const { modifiedCount } = await col.orders().updateOne(
+    { _id: oid(order.id), status: { $ne: 'cancelled' } },
+    { $set, $push: { statusHistory: { status, at: now() } } }
+  );
+  if (modifiedCount && status === 'cancelled') {
+    const qty = {};
+    order.items.forEach((i) => (qty[i.productId] = (qty[i.productId] || 0) + i.quantity));
+    await releaseStock(qty);
+  }
 }
 
 export default router;

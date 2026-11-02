@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { col, docData, snapData } from '../config/firebase.js';
+import { col, findById, oid, toDoc, toDocs } from '../config/db.js';
 import { adminOnly, protect } from '../middleware/auth.js';
 import { ApiError, asyncHandler, now, pick, required, slugify } from '../utils/helpers.js';
 
@@ -9,16 +9,18 @@ const FIELDS = ['name', 'description', 'image', 'icon', 'active', 'order'];
 router.get(
   '/',
   asyncHandler(async (req, res) => {
-    let cats = snapData(await col.categories().get());
-    if (req.query.all !== 'true') cats = cats.filter((c) => c.active !== false);
-    const products = snapData(await col.products().select('categoryId', 'active').get());
-    cats = cats
-      .map((c) => ({
-        ...c,
-        productCount: products.filter((p) => p.categoryId === c.id && p.active !== false).length,
-      }))
-      .sort((a, b) => (a.order ?? 0) - (b.order ?? 0) || a.name.localeCompare(b.name));
-    res.json({ categories: cats });
+    const filter = req.query.all === 'true' ? {} : { active: { $ne: false } };
+    const [cats, counts] = await Promise.all([
+      col.categories().find(filter).sort({ order: 1, name: 1 }).toArray(),
+      col.products()
+        .aggregate([
+          { $match: { active: { $ne: false }, sellerActive: { $ne: false } } },
+          { $group: { _id: '$categoryId', n: { $sum: 1 } } },
+        ])
+        .toArray(),
+    ]);
+    const countOf = Object.fromEntries(counts.map((c) => [c._id, c.n]));
+    res.json({ categories: toDocs(cats).map((c) => ({ ...c, productCount: countOf[c.id] || 0 })) });
   })
 );
 
@@ -36,8 +38,8 @@ router.post(
       createdAt: now(),
       updatedAt: now(),
     };
-    const ref = await col.categories().add(data);
-    res.status(201).json({ category: { id: ref.id, ...data } });
+    const { insertedId } = await col.categories().insertOne(data);
+    res.status(201).json({ category: toDoc({ _id: insertedId, ...data }) });
   })
 );
 
@@ -46,12 +48,12 @@ router.put(
   protect,
   adminOnly,
   asyncHandler(async (req, res) => {
-    const ref = col.categories().doc(req.params.id);
-    if (!(await ref.get()).exists) throw new ApiError(404, 'Category not found');
+    const _id = oid(req.params.id);
     const updates = { ...pick(req.body, FIELDS), updatedAt: now() };
     if (updates.name) updates.slug = slugify(updates.name);
-    await ref.update(updates);
-    res.json({ category: docData(await ref.get()) });
+    const { matchedCount } = _id ? await col.categories().updateOne({ _id }, { $set: updates }) : { matchedCount: 0 };
+    if (!matchedCount) throw new ApiError(404, 'Category not found');
+    res.json({ category: await findById(col.categories(), req.params.id) });
   })
 );
 
@@ -60,9 +62,9 @@ router.delete(
   protect,
   adminOnly,
   asyncHandler(async (req, res) => {
-    const used = await col.products().where('categoryId', '==', req.params.id).limit(1).get();
-    if (!used.empty) throw new ApiError(400, 'Category has products. Move or delete them first.');
-    await col.categories().doc(req.params.id).delete();
+    if (await col.products().findOne({ categoryId: req.params.id }, { projection: { _id: 1 } }))
+      throw new ApiError(400, 'Category has products. Move or delete them first.');
+    await col.categories().deleteOne({ _id: oid(req.params.id) });
     res.json({ message: 'Category deleted' });
   })
 );
