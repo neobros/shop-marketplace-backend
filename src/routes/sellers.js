@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { col, escapeRegex, findById, oid, toDoc, toDocs } from '../config/db.js';
 import { DISTRICTS, SHOP_STATUSES } from '../config/shop.js';
 import { adminOnly, protect } from '../middleware/auth.js';
-import { ApiError, asyncHandler, now, pick, publicUser, required, slugify } from '../utils/helpers.js';
+import { ApiError, asyncHandler, hideContactsIn, now, pick, publicUser, required, slugify } from '../utils/helpers.js';
 
 /**
  * Sellers (artisan shops). A seller is a user with role "seller" and a `shop` object:
@@ -11,8 +11,23 @@ import { ApiError, asyncHandler, now, pick, publicUser, required, slugify } from
  */
 const router = Router();
 const SHOP_FIELDS = ['name', 'tagline', 'bio', 'district', 'phone', 'logo', 'banner', 'craft', 'story'];
+// Free-text shop fields shown to customers — contact details are removed from these
+const SHOP_TEXT_FIELDS = ['name', 'tagline', 'bio', 'craft', 'story'];
+// What customers may see about a shop. No phone number or full name, so buyers order
+// through the marketplace instead of contacting artisans directly.
+const PUBLIC_SHOP_FIELDS = ['name', 'tagline', 'bio', 'district', 'logo', 'banner', 'craft', 'story', 'slug', 'status', 'approvedAt'];
+
+export const firstName = (name = '') => name.trim().split(/\s+/)[0] || '';
 
 const publicShop = (u, extra = {}) => ({
+  id: u.id,
+  ownerName: firstName(u.name),
+  ...pick(u.shop || {}, PUBLIC_SHOP_FIELDS),
+  ...extra,
+});
+
+/** Full shop details incl. phone and owner name — admin only. */
+const adminShop = (u, extra = {}) => ({
   id: u.id,
   ownerName: u.name,
   ...pick(u.shop || {}, [...SHOP_FIELDS, 'slug', 'status', 'approvedAt']),
@@ -94,10 +109,11 @@ router.post(
     if (me.shop?.status === 'approved') throw new ApiError(400, 'Your shop is already approved');
     if (me.shop?.status === 'suspended') throw new ApiError(403, 'Your shop is suspended. Please contact support.');
 
+    const fields = hideContactsIn(pick(req.body, SHOP_FIELDS), SHOP_TEXT_FIELDS);
     const shop = {
       ...(me.shop || {}),
-      ...pick(req.body, SHOP_FIELDS),
-      slug: await uniqueSlug(req.body.name, me.id),
+      ...fields,
+      slug: await uniqueSlug(fields.name.replace('[hidden]', ''), me.id),
       status: 'pending',
       note: '',
       appliedAt: now(),
@@ -114,8 +130,8 @@ router.put(
   asyncHandler(async (req, res) => {
     if (req.user.role !== 'seller') throw new ApiError(403, 'You do not have a shop');
     validateShop(req.body);
-    const shop = { ...req.user.shop, ...pick(req.body, SHOP_FIELDS) };
-    if (req.body.name && req.body.name !== req.user.shop.name) shop.slug = await uniqueSlug(req.body.name, req.user.id);
+    const shop = { ...req.user.shop, ...hideContactsIn(pick(req.body, SHOP_FIELDS), SHOP_TEXT_FIELDS) };
+    if (shop.name !== req.user.shop.name) shop.slug = await uniqueSlug(shop.name.replace('[hidden]', ''), req.user.id);
     await col.users().updateOne({ _id: oid(req.user.id) }, { $set: { shop, updatedAt: now() } });
     await setProductsVisible(req.user.id, shop.status === 'approved', {
       shopName: shop.name, shopSlug: shop.slug, district: shop.district,
@@ -148,7 +164,7 @@ router.get(
     const countOf = Object.fromEntries(productCounts.map((r) => [r._id, r.n]));
     const revenueOf = Object.fromEntries(revenue.map((r) => [r._id, r.revenue]));
     const list = toDocs(sellers).map((u) => ({
-      ...publicShop(u),
+      ...adminShop(u),
       email: u.email,
       appliedAt: u.shop?.appliedAt,
       note: u.shop?.note || '',
@@ -173,7 +189,7 @@ router.put(
     if (status === 'approved' && !user.shop.approvedAt) shop.approvedAt = now();
     await col.users().updateOne({ _id: oid(user.id) }, { $set: { shop, role: 'seller', updatedAt: now() } });
     await setProductsVisible(user.id, status === 'approved');
-    res.json({ seller: publicShop({ ...user, shop }) });
+    res.json({ seller: adminShop({ ...user, shop }) });
   })
 );
 
