@@ -2,8 +2,8 @@
 
 Node.js + Express REST API for **Ceylon Craft Collective**, a multi-vendor marketplace where Sri Lankan artisans and small creative businesses sell handmade products.
 
-- **Database:** Firebase **Firestore**.
-- **Auth:** the API's own **JWT + bcrypt**. It does not use Firebase Authentication.
+- **Database:** **MongoDB**, through the official `mongodb` driver. It works with MongoDB Atlas or a local server.
+- **Auth:** the API's own **JWT + bcrypt**.
 - **Roles:** `customer`, `seller` (artisan shop) and `admin`.
 - **Currency:** LKR. Delivery costs Rs 450 and is free over Rs 15,000. The platform commission is 10%. Change these in `src/config/shop.js` or `.env`.
 
@@ -11,12 +11,13 @@ Node.js + Express REST API for **Ceylon Craft Collective**, a multi-vendor marke
 
 ```bash
 npm install
-cp .env.example .env          # then set JWT_SECRET
+cp .env.example .env          # first time only — then set JWT_SECRET and MONGODB_URI
 ```
 
-1. In the [Firebase Console](https://console.firebase.google.com), create a project and enable **Firestore Database**.
-2. Go to **Project settings → Service accounts → Generate new private key** and save the file as `serviceAccountKey.json` in this folder. It is git-ignored.
-3. Seed the demo data and start the API:
+1. Get a MongoDB database:
+   - **Atlas (recommended, free tier):** at [cloud.mongodb.com](https://cloud.mongodb.com), create a cluster. Add a database user under **Database Access**. Under **Network Access**, allow `0.0.0.0/0` so Vercel can connect. Then copy the connection string from **Connect → Drivers** into `MONGODB_URI`.
+   - **Local:** install MongoDB Community Server and use `MONGODB_URI=mongodb://127.0.0.1:27017`.
+2. Seed the demo data and start the API. Indexes are created automatically on the first connection.
 
 ```bash
 npm run seed -- --fresh   # categories, 8 artisan shops, 41 products, banners, reviews, orders
@@ -30,32 +31,26 @@ npm run dev               # http://localhost:5000
 | Seller (pending application) | jaffnapalmyrah@demo.lk | Seller@123 |
 | Customer | ayesha@demo.lk | Customer@123 |
 
-### Running without a Firebase project
-```bash
-npx firebase-tools emulators:start --only firestore --project demo-shop   # needs Java
-FIRESTORE_EMULATOR_HOST=127.0.0.1:8080 npm run seed -- --fresh
-FIRESTORE_EMULATOR_HOST=127.0.0.1:8080 npm run dev
-```
-
 ## Deploy to Vercel
-The app lives in `src/app.js`. `api/index.js` exposes it as a serverless function, and `vercel.json` sends every route to it. For local development, `src/server.js` still runs `app.listen`.
+The app lives in `src/app.js`. `api/index.js` exposes it as a serverless function, and `vercel.json` sends every route to it. The MongoDB connection is cached between requests. For local development, `src/server.js` still runs `app.listen`.
 
 1. Import this repo in Vercel (Framework preset: **Other**, no build command).
 2. Add these environment variables in Vercel:
+   - `MONGODB_URI`: your Atlas connection string
+   - `MONGODB_DB`: `ceylon_craft`
    - `JWT_SECRET`: a long random string
-   - `FIREBASE_SERVICE_ACCOUNT`: the full contents of `serviceAccountKey.json`
    - `CLIENT_URL`: your frontend URL, e.g. `https://your-shop.vercel.app`
-3. Deploy, then open `https://<backend>.vercel.app/api/health`.
+3. Deploy, then open `https://<backend>.vercel.app/api/health`. It should return `{"ok":true,"db":"mongodb",...}`.
 4. In the frontend project, set `VITE_API_URL=https://<backend>.vercel.app/api` and redeploy.
 
-Run `npm run seed` from your own machine (with `.env` pointing at the same Firebase project), not on Vercel.
+Run `npm run seed` from your own machine, with `.env` pointing at the same MongoDB, not on Vercel.
 
 ## How the marketplace works
 1. **Applying:** a customer applies at `POST /api/sellers/apply`. Their role becomes `seller` and the shop status becomes `pending`.
 2. **Review:** an admin approves, rejects or suspends the shop at `PUT /api/sellers/:id/status`. Suspending a shop hides all of its products.
 3. **Products:** approved sellers create and edit only their own products. Each product stores its shop's name, slug and district, so listings need no extra lookups. Only admins can set the "featured" flag.
 4. **Orders:** an order can contain items from several sellers. Each seller sees only their own lines, plus their earnings after commission, at `GET /api/seller/orders`. They update their own fulfilment status (processing → shipped → delivered). The order's overall status is worked out from all sellers' statuses.
-5. **Integrity:** prices are recalculated on the server, stock is checked and decremented in a transaction, and cancelling an order restores the stock.
+5. **Integrity:** prices are recalculated on the server, stock is reserved with conditional atomic updates (an order can never oversell, and a failed checkout rolls back), and cancelling an order restores the stock exactly once.
 
 ## API
 

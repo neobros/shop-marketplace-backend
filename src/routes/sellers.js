@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { col, db, docData, snapData } from '../config/firebase.js';
+import { col, escapeRegex, findById, oid, toDoc, toDocs } from '../config/db.js';
 import { DISTRICTS, SHOP_STATUSES } from '../config/shop.js';
 import { adminOnly, protect } from '../middleware/auth.js';
 import { ApiError, asyncHandler, now, pick, publicUser, required, slugify } from '../utils/helpers.js';
@@ -23,20 +23,34 @@ async function uniqueSlug(name, exceptUserId) {
   const base = slugify(name) || 'shop';
   let slug = base;
   for (let i = 2; ; i++) {
-    const snap = await col.users().where('shop.slug', '==', slug).limit(1).get();
-    if (snap.empty || snap.docs[0].id === exceptUserId) return slug;
+    const taken = await col.users().findOne({ 'shop.slug': slug }, { projection: { _id: 1 } });
+    if (!taken || taken._id.toString() === exceptUserId) return slug;
     slug = `${base}-${i}`;
   }
 }
 
-/** Shows or hides all of a seller's products when the shop status changes. */
-async function setProductsVisible(sellerId, visible, shopPatch = {}) {
-  const snap = await col.products().where('sellerId', '==', sellerId).get();
-  for (let i = 0; i < snap.docs.length; i += 400) {
-    const batch = db.batch();
-    snap.docs.slice(i, i + 400).forEach((d) => batch.update(d.ref, { sellerActive: visible, ...shopPatch }));
-    await batch.commit();
-  }
+/** Shows or hides all of a seller's products (and syncs denormalised shop info) when the shop changes. */
+const setProductsVisible = (sellerId, visible, shopPatch = {}) =>
+  col.products().updateMany({ sellerId }, { $set: { sellerActive: visible, ...shopPatch } });
+
+/** Per-seller product stats: { [sellerId]: { productCount, sold, rating } } */
+async function productStats(match = {}) {
+  const rows = await col.products()
+    .aggregate([
+      { $match: { active: { $ne: false }, sellerId: { $nin: ['', null] }, ...match } },
+      {
+        $group: {
+          _id: '$sellerId',
+          productCount: { $sum: 1 },
+          sold: { $sum: { $ifNull: ['$sold', 0] } },
+          rating: { $avg: { $cond: [{ $gt: ['$rating', 0] }, '$rating', null] } },
+        },
+      },
+    ])
+    .toArray();
+  return Object.fromEntries(
+    rows.map((r) => [r._id, { productCount: r.productCount, sold: r.sold, rating: r.rating ? Math.round(r.rating * 10) / 10 : 0 }])
+  );
 }
 
 const validateShop = (body) => {
@@ -49,27 +63,19 @@ const validateShop = (body) => {
 router.get(
   '/',
   asyncHandler(async (req, res) => {
-    const [sellers, products] = await Promise.all([
-      col.users().where('role', '==', 'seller').get().then(snapData),
-      col.products().select('sellerId', 'active', 'rating', 'numReviews', 'sold').get().then(snapData),
-    ]);
-    let list = sellers
-      .filter((u) => u.shop?.status === 'approved')
-      .map((u) => {
-        const mine = products.filter((p) => p.sellerId === u.id && p.active !== false);
-        const rated = mine.filter((p) => p.rating > 0);
-        return publicShop(u, {
-          productCount: mine.length,
-          sold: mine.reduce((s, p) => s + (p.sold || 0), 0),
-          rating: rated.length ? Math.round((rated.reduce((s, p) => s + p.rating, 0) / rated.length) * 10) / 10 : 0,
-        });
-      });
-    if (req.query.district) list = list.filter((s) => s.district === req.query.district);
+    const filter = { role: 'seller', 'shop.status': 'approved' };
+    if (req.query.district) filter['shop.district'] = String(req.query.district);
     if (req.query.q) {
-      const t = req.query.q.toLowerCase();
-      list = list.filter((s) => [s.name, s.tagline, s.craft, s.district, s.ownerName].some((v) => v?.toLowerCase().includes(t)));
+      const re = { $regex: escapeRegex(String(req.query.q)), $options: 'i' };
+      filter.$or = [{ 'shop.name': re }, { 'shop.tagline': re }, { 'shop.craft': re }, { 'shop.district': re }, { name: re }];
     }
-    list.sort((a, b) => b.sold - a.sold);
+    const [sellers, stats] = await Promise.all([
+      col.users().find(filter, { projection: { password: 0 } }).toArray(),
+      productStats(),
+    ]);
+    const list = toDocs(sellers)
+      .map((u) => publicShop(u, stats[u.id] || { productCount: 0, sold: 0, rating: 0 }))
+      .sort((a, b) => b.sold - a.sold);
     res.json({ sellers: list, districts: DISTRICTS });
   })
 );
@@ -96,8 +102,8 @@ router.post(
       note: '',
       appliedAt: now(),
     };
-    await col.users().doc(me.id).update({ role: 'seller', shop, updatedAt: now() });
-    res.status(201).json({ user: publicUser(docData(await col.users().doc(me.id).get())) });
+    await col.users().updateOne({ _id: oid(me.id) }, { $set: { role: 'seller', shop, updatedAt: now() } });
+    res.status(201).json({ user: publicUser(await findById(col.users(), me.id)) });
   })
 );
 
@@ -110,12 +116,11 @@ router.put(
     validateShop(req.body);
     const shop = { ...req.user.shop, ...pick(req.body, SHOP_FIELDS) };
     if (req.body.name && req.body.name !== req.user.shop.name) shop.slug = await uniqueSlug(req.body.name, req.user.id);
-    await col.users().doc(req.user.id).update({ shop, updatedAt: now() });
-    // keep denormalised shop info on products in sync
+    await col.users().updateOne({ _id: oid(req.user.id) }, { $set: { shop, updatedAt: now() } });
     await setProductsVisible(req.user.id, shop.status === 'approved', {
       shopName: shop.name, shopSlug: shop.slug, district: shop.district,
     });
-    res.json({ user: publicUser(docData(await col.users().doc(req.user.id).get())) });
+    res.json({ user: publicUser(await findById(col.users(), req.user.id)) });
   })
 );
 
@@ -127,28 +132,29 @@ router.get(
   protect,
   adminOnly,
   asyncHandler(async (req, res) => {
-    const [sellers, products, orders] = await Promise.all([
-      col.users().where('role', '==', 'seller').get().then(snapData),
-      col.products().select('sellerId').get().then(snapData),
-      col.orders().select('items', 'status').get().then(snapData),
+    const filter = { role: 'seller' };
+    if (req.query.status) filter['shop.status'] = String(req.query.status);
+    const [sellers, productCounts, revenue] = await Promise.all([
+      col.users().find(filter, { projection: { password: 0 } }).sort({ 'shop.appliedAt': -1 }).toArray(),
+      col.products().aggregate([{ $group: { _id: '$sellerId', n: { $sum: 1 } } }]).toArray(),
+      col.orders()
+        .aggregate([
+          { $match: { status: { $ne: 'cancelled' } } },
+          { $unwind: '$items' },
+          { $group: { _id: '$items.sellerId', revenue: { $sum: { $multiply: ['$items.price', '$items.quantity'] } } } },
+        ])
+        .toArray(),
     ]);
-    let list = sellers.map((u) => {
-      let revenue = 0;
-      orders.forEach((o) => {
-        if (o.status === 'cancelled') return;
-        o.items.forEach((i) => i.sellerId === u.id && (revenue += i.price * i.quantity));
-      });
-      return {
-        ...publicShop(u),
-        email: u.email,
-        appliedAt: u.shop?.appliedAt,
-        note: u.shop?.note || '',
-        productCount: products.filter((p) => p.sellerId === u.id).length,
-        revenue,
-      };
-    });
-    if (req.query.status) list = list.filter((s) => s.status === req.query.status);
-    list.sort((a, b) => (b.appliedAt || '').localeCompare(a.appliedAt || ''));
+    const countOf = Object.fromEntries(productCounts.map((r) => [r._id, r.n]));
+    const revenueOf = Object.fromEntries(revenue.map((r) => [r._id, r.revenue]));
+    const list = toDocs(sellers).map((u) => ({
+      ...publicShop(u),
+      email: u.email,
+      appliedAt: u.shop?.appliedAt,
+      note: u.shop?.note || '',
+      productCount: countOf[u.id] || 0,
+      revenue: revenueOf[u.id] || 0,
+    }));
     res.json({ sellers: list });
   })
 );
@@ -161,12 +167,11 @@ router.put(
   asyncHandler(async (req, res) => {
     const { status, note = '' } = req.body;
     if (!SHOP_STATUSES.includes(status)) throw new ApiError(400, 'Invalid status');
-    const ref = col.users().doc(req.params.id);
-    const user = docData(await ref.get());
+    const user = await findById(col.users(), req.params.id);
     if (!user?.shop) throw new ApiError(404, 'Seller not found');
     const shop = { ...user.shop, status, note };
     if (status === 'approved' && !user.shop.approvedAt) shop.approvedAt = now();
-    await ref.update({ shop, role: 'seller', updatedAt: now() });
+    await col.users().updateOne({ _id: oid(user.id) }, { $set: { shop, role: 'seller', updatedAt: now() } });
     await setProductsVisible(user.id, status === 'approved');
     res.json({ seller: publicShop({ ...user, shop }) });
   })
@@ -178,12 +183,11 @@ router.put(
 router.get(
   '/:slug',
   asyncHandler(async (req, res) => {
-    const snap = await col.users().where('shop.slug', '==', req.params.slug).limit(1).get();
-    const u = snap.empty ? null : { id: snap.docs[0].id, ...snap.docs[0].data() };
+    const u = toDoc(await col.users().findOne({ 'shop.slug': req.params.slug }, { projection: { password: 0 } }));
     if (!u || u.shop?.status !== 'approved') throw new ApiError(404, 'Shop not found');
-    const products = snapData(await col.products().where('sellerId', '==', u.id).get())
-      .filter((p) => p.active !== false)
-      .sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+    const products = toDocs(
+      await col.products().find({ sellerId: u.id, active: { $ne: false } }).sort({ createdAt: -1 }).toArray()
+    );
     const rated = products.filter((p) => p.rating > 0);
     res.json({
       seller: publicShop(u, {

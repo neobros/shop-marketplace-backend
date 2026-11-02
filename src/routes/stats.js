@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { col, snapData } from '../config/firebase.js';
+import { col, toDocs } from '../config/db.js';
 import { adminOnly, protect } from '../middleware/auth.js';
 import { asyncHandler } from '../utils/helpers.js';
 import { COMMISSION_RATE } from '../config/shop.js';
@@ -14,10 +14,10 @@ router.get(
   asyncHandler(async (req, res) => {
     const days = Math.min(365, Math.max(7, parseInt(req.query.days, 10) || 30));
     const [orders, products, users, categories] = await Promise.all([
-      col.orders().get().then(snapData),
-      col.products().get().then(snapData),
-      col.users().select('role', 'createdAt', 'shop', 'name').get().then(snapData),
-      col.categories().get().then(snapData),
+      col.orders().find({}, { projection: { shippingAddress: 0, statusHistory: 0, note: 0 } }).toArray().then(toDocs),
+      col.products().find({}, { projection: { name: 1, images: 1, price: 1, sold: 1, stock: 1, categoryId: 1 } }).toArray().then(toDocs),
+      col.users().find({}, { projection: { role: 1, createdAt: 1, shop: 1, name: 1 } }).toArray().then(toDocs),
+      col.categories().find({}, { projection: { name: 1 } }).toArray().then(toDocs),
     ]);
 
     const valid = orders.filter((o) => o.status !== 'cancelled');

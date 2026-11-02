@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { col, db, docData, snapData } from '../config/firebase.js';
+import { col, findById, oid, toDocs } from '../config/db.js';
 import { COMMISSION_RATE } from '../config/shop.js';
 import { protect } from '../middleware/auth.js';
 import { ApiError, asyncHandler, now } from '../utils/helpers.js';
@@ -38,17 +38,15 @@ const sellerView = (o, sellerId) => {
 };
 
 const myOrders = async (sellerId) =>
-  snapData(await col.orders().where('sellerIds', 'array-contains', sellerId).get())
-    .map((o) => sellerView(o, sellerId))
-    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  toDocs(await col.orders().find({ sellerIds: sellerId }).sort({ createdAt: -1 }).toArray()).map((o) => sellerView(o, sellerId));
+
+const myProducts = async (sellerId) => toDocs(await col.products().find({ sellerId }).sort({ createdAt: -1 }).toArray());
 
 // GET /api/seller/products — own products including inactive ones
 router.get(
   '/products',
   asyncHandler(async (req, res) => {
-    const products = snapData(await col.products().where('sellerId', '==', req.user.id).get()).sort((a, b) =>
-      (b.createdAt || '').localeCompare(a.createdAt || '')
-    );
+    const products = await myProducts(req.user.id);
     res.json({ products, total: products.length });
   })
 );
@@ -69,21 +67,34 @@ router.put(
   asyncHandler(async (req, res) => {
     const { status } = req.body;
     if (!SELLER_STATUSES.includes(status)) throw new ApiError(400, 'Invalid status');
-    const ref = col.orders().doc(req.params.id);
+    const _id = oid(req.params.id);
+    const sellerId = req.user.id;
 
-    await db.runTransaction(async (tx) => {
-      const order = docData(await tx.get(ref));
-      if (!order || !order.sellerIds?.includes(req.user.id)) throw new ApiError(404, 'Order not found');
-      if (order.status === 'cancelled') throw new ApiError(400, 'This order was cancelled');
-      const fulfilment = { ...order.fulfilment, [req.user.id]: { status, at: now() } };
-      const overall = deriveStatus(fulfilment);
-      const updates = { fulfilment, status: overall, updatedAt: now() };
-      if (overall !== order.status) updates.statusHistory = [...(order.statusHistory || []), { status: overall, at: now() }];
-      if (overall === 'delivered' && order.paymentMethod === 'cod') updates.paymentStatus = 'paid';
-      tx.update(ref, updates);
-    });
+    // 1) atomically set only this seller's fulfilment entry (other sellers can update at the same time)
+    const order = _id
+      ? await col.orders().findOneAndUpdate(
+          { _id, sellerIds: sellerId, status: { $ne: 'cancelled' } },
+          { $set: { [`fulfilment.${sellerId}`]: { status, at: now() }, updatedAt: now() } },
+          { returnDocument: 'after' }
+        )
+      : null;
+    if (!order) {
+      const existing = _id && (await col.orders().findOne({ _id, sellerIds: sellerId }, { projection: { status: 1 } }));
+      throw existing ? new ApiError(400, 'This order was cancelled') : new ApiError(404, 'Order not found');
+    }
 
-    res.json({ order: sellerView(docData(await ref.get()), req.user.id) });
+    // 2) recompute the overall status from all sellers
+    const overall = deriveStatus(order.fulfilment);
+    if (overall !== order.status) {
+      const $set = { status: overall };
+      if (overall === 'delivered' && order.paymentMethod === 'cod') $set.paymentStatus = 'paid';
+      await col.orders().updateOne(
+        { _id, status: { $ne: 'cancelled' } },
+        { $set, $push: { statusHistory: { status: overall, at: now() } } }
+      );
+    }
+
+    res.json({ order: sellerView(await findById(col.orders(), req.params.id), sellerId) });
   })
 );
 
@@ -94,8 +105,8 @@ router.get(
     const days = Math.min(365, Math.max(7, parseInt(req.query.days, 10) || 30));
     const [orders, products, reviews] = await Promise.all([
       myOrders(req.user.id),
-      col.products().where('sellerId', '==', req.user.id).get().then(snapData),
-      col.reviews().where('sellerId', '==', req.user.id).get().then(snapData),
+      myProducts(req.user.id),
+      col.reviews().find({ sellerId: req.user.id }).sort({ createdAt: -1 }).toArray().then(toDocs),
     ]);
     const valid = orders.filter((o) => o.status !== 'cancelled');
 

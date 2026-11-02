@@ -1,12 +1,12 @@
 /**
- * Seeds Firestore for "Ceylon Craft Collective": admin, artisan shops (sellers), craft categories,
+ * Seeds MongoDB for "Ceylon Craft Collective": admin, artisan shops (sellers), craft categories,
  * products (LKR), banners, customers, reviews and demo orders.
  *   npm run seed            -> add data (skips users that already exist)
  *   npm run seed -- --fresh -> wipe shop collections + demo users first
  */
 import 'dotenv/config';
 import bcrypt from 'bcryptjs';
-import { col, db } from '../config/firebase.js';
+import { closeDB, col, connectDB, oid } from '../config/db.js';
 import { COMMISSION_RATE, FREE_SHIPPING_OVER, SHIPPING_FLAT } from '../config/shop.js';
 import { slugify } from '../utils/helpers.js';
 import { c, un } from './seed-images.js';
@@ -15,19 +15,17 @@ const fresh = process.argv.includes('--fresh');
 const iso = (daysAgo = 0) => new Date(Date.now() - daysAgo * 864e5).toISOString();
 
 async function wipe(name) {
-  const snap = await db.collection(name).get();
-  for (let i = 0; i < snap.docs.length; i += 400) {
-    const b = db.batch();
-    snap.docs.slice(i, i + 400).forEach((d) => b.delete(d.ref));
-    await b.commit();
-  }
-  console.log(`  wiped ${name} (${snap.size})`);
+  const { deletedCount } = await col[name]().deleteMany({});
+  console.log(`  wiped ${name} (${deletedCount})`);
 }
 
+/** insertOne and return { id } like the API does */
+const add = async (collection, data) => ({ id: (await collection.insertOne(data)).insertedId.toString() });
+
 async function upsertUser(data) {
-  const ex = await col.users().where('email', '==', data.email).limit(1).get();
-  if (!ex.empty) return { id: ex.docs[0].id, ...ex.docs[0].data(), existed: true };
-  const ref = await col.users().add({
+  const ex = await col.users().findOne({ email: data.email });
+  if (ex) return { ...ex, id: ex._id.toString(), existed: true };
+  const ref = await add(col.users(), {
     phone: '', avatar: '', address: {}, wishlist: [], blocked: false, demo: true,
     createdAt: iso(), updatedAt: iso(), ...data,
   });
@@ -189,12 +187,12 @@ const REVIEWS = [
 ];
 
 async function run() {
-  console.log('Seeding Firestore…');
+  await connectDB();
+  console.log(`Seeding MongoDB database "${process.env.MONGODB_DB || 'ceylon_craft'}"…`);
   if (fresh) {
     for (const name of ['categories', 'products', 'banners', 'orders', 'reviews']) await wipe(name);
-    const demo = await col.users().where('demo', '==', true).get();
-    await Promise.all(demo.docs.map((d) => d.ref.delete()));
-    console.log(`  removed ${demo.size} demo users`);
+    const { deletedCount } = await col.users().deleteMany({ demo: true });
+    console.log(`  removed ${deletedCount} demo users`);
   }
 
   // Admin
@@ -208,7 +206,7 @@ async function run() {
   // Categories
   const cat = {};
   for (const [i, { key, ...data }] of CATEGORIES.entries()) {
-    const ref = await col.categories().add({ ...data, slug: slugify(data.name), active: true, order: i, createdAt: iso(), updatedAt: iso() });
+    const ref = await add(col.categories(), { ...data, slug: slugify(data.name), active: true, order: i, createdAt: iso(), updatedAt: iso() });
     cat[key] = ref.id;
   }
   console.log(`  ${CATEGORIES.length} categories`);
@@ -266,16 +264,16 @@ async function run() {
       rating: Math.round((myReviews.reduce((s, r) => s + r[0], 0) / myReviews.length) * 10) / 10,
       numReviews: myReviews.length, sold: 0, createdAt: created, updatedAt: created, ...extra,
     };
-    const ref = await col.products().add(data);
+    const ref = await add(col.products(), data);
     products.push({ id: ref.id, ...data });
     for (const [k, [rating, comment]] of myReviews.entries()) {
       const cu = customers[(i + k) % customers.length];
-      await col.reviews().add({ productId: ref.id, sellerId: shop.id, userId: cu.id, userName: cu.name, rating, comment, createdAt: iso(i + k) });
+      await add(col.reviews(), { productId: ref.id, sellerId: shop.id, userId: cu.id, userName: cu.name, rating, comment, createdAt: iso(i + k) });
     }
   }
   console.log(`  ${products.length} products with reviews`);
 
-  for (const b of BANNERS) await col.banners().add({ textColor: '', active: true, ...b, createdAt: iso() });
+  for (const b of BANNERS) await add(col.banners(), { textColor: '', active: true, ...b, createdAt: iso() });
   console.log(`  ${BANNERS.length} banners`);
 
   // Demo orders (some contain items from several artisans)
@@ -296,7 +294,7 @@ async function run() {
     const at = iso(Math.random() * 30);
     const sellerIds = [...new Set(lines.map((l) => l.sellerId))];
     if (status !== 'cancelled') lines.forEach((l) => (sold[l.productId] = (sold[l.productId] || 0) + l.quantity));
-    await col.orders().add({
+    await add(col.orders(), {
       orderNumber: `CCC-DEMO-${String(i + 1).padStart(4, '0')}`,
       userId: cu.id, customer: { name: cu.name, email: cu.email, phone: cu.phone }, items: lines, sellerIds,
       fulfilment: Object.fromEntries(sellerIds.map((id) => [id, { status, at }])),
@@ -307,10 +305,11 @@ async function run() {
       createdAt: at, updatedAt: at,
     });
   }
-  await Promise.all(Object.entries(sold).map(([id, n]) => col.products().doc(id).update({ sold: n })));
+  await Promise.all(Object.entries(sold).map(([id, n]) => col.products().updateOne({ _id: oid(id) }, { $set: { sold: n } })));
   console.log(`  48 demo orders (commission rate ${COMMISSION_RATE * 100}%)`);
 
   console.log('Done ✔');
+  await closeDB();
   process.exit(0);
 }
 
