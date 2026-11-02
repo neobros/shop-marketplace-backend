@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { col, docData, snapData } from '../config/firebase.js';
+import { col, escapeRegex, findById, oid, toDoc, toDocs } from '../config/db.js';
 import { protect } from '../middleware/auth.js';
 import { ApiError, asyncHandler, now, pick, required, slugify } from '../utils/helpers.js';
 
@@ -9,6 +9,14 @@ const FIELDS = [
   'stock', 'sku', 'tags', 'colors', 'sizes', 'materials', 'dimensions', 'isNew', 'active',
 ];
 const ADMIN_FIELDS = ['featured', 'sellerId'];
+const VISIBLE = { active: { $ne: false }, sellerActive: { $ne: false } };
+const SORTS = {
+  newest: { createdAt: -1 },
+  'price-asc': { price: 1 },
+  'price-desc': { price: -1 },
+  rating: { rating: -1, numReviews: -1 },
+  popular: { sold: -1 },
+};
 
 const normalize = (body, isAdmin) => {
   const data = pick(body, isAdmin ? [...FIELDS, ...ADMIN_FIELDS] : FIELDS);
@@ -34,7 +42,7 @@ const canSell = (req, _res, next) => {
 /** Denormalised shop info stored on each product (so listings need no extra lookups). */
 async function shopInfo(sellerId) {
   if (!sellerId) return { sellerId: '', shopName: '', shopSlug: '', district: '', sellerActive: true };
-  const u = docData(await col.users().doc(sellerId).get());
+  const u = await findById(col.users(), sellerId);
   if (!u?.shop) throw new ApiError(400, 'Seller not found');
   return {
     sellerId,
@@ -45,14 +53,14 @@ async function shopInfo(sellerId) {
   };
 }
 
-const visible = (p) => p.active !== false && p.sellerActive !== false;
+/** Find a product by id or slug. */
+const findProduct = async (idOrSlug) =>
+  (await findById(col.products(), idOrSlug)) || toDoc(await col.products().findOne({ slug: idOrSlug }));
 
 /**
  * GET /api/products
  * query: q, category (id or slug), seller (id or shop slug), district, minPrice, maxPrice,
  *        sort (newest|price-asc|price-desc|rating|popular), featured, isNew, page, limit, all (admin)
- *
- * Filtering happens in memory so no composite Firestore indexes are needed.
  */
 router.get(
   '/',
@@ -61,44 +69,39 @@ router.get(
     const page = Math.max(1, parseInt(req.query.page, 10) || 1);
     const limit = Math.min(all === 'true' ? 1000 : 100, Math.max(1, parseInt(req.query.limit, 10) || 12));
 
-    let items = snapData(await col.products().get());
-    if (all !== 'true') items = items.filter(visible);
-
+    const and = [];
+    if (all !== 'true') and.push(VISIBLE);
     if (category) {
-      let catId = category;
-      const bySlug = await col.categories().where('slug', '==', category).limit(1).get();
-      if (!bySlug.empty) catId = bySlug.docs[0].id;
-      items = items.filter((p) => p.categoryId === catId);
+      const cat = await col.categories().findOne({ slug: String(category) }, { projection: { _id: 1 } });
+      and.push({ categoryId: cat ? cat._id.toString() : String(category) });
     }
-    if (seller) items = items.filter((p) => p.sellerId === seller || p.shopSlug === seller);
-    if (district) items = items.filter((p) => p.district === district);
+    if (seller) and.push({ $or: [{ sellerId: String(seller) }, { shopSlug: String(seller) }] });
+    if (district) and.push({ district: String(district) });
     if (q) {
-      const term = q.toLowerCase();
-      items = items.filter((p) =>
-        [p.name, p.shopName, p.description, p.district, ...(p.tags || [])].some((v) => v?.toLowerCase().includes(term))
-      );
+      const re = { $regex: escapeRegex(String(q)), $options: 'i' };
+      and.push({ $or: [{ name: re }, { shopName: re }, { description: re }, { district: re }, { tags: re }] });
     }
-    if (minPrice) items = items.filter((p) => p.price >= Number(minPrice));
-    if (maxPrice) items = items.filter((p) => p.price <= Number(maxPrice));
-    if (featured === 'true') items = items.filter((p) => p.featured);
-    if (isNew === 'true') items = items.filter((p) => p.isNew);
+    if (minPrice || maxPrice) {
+      const price = {};
+      if (minPrice) price.$gte = Number(minPrice);
+      if (maxPrice) price.$lte = Number(maxPrice);
+      and.push({ price });
+    }
+    if (featured === 'true') and.push({ featured: true });
+    if (isNew === 'true') and.push({ isNew: true });
+    const filter = and.length ? { $and: and } : {};
 
-    const sorters = {
-      newest: (a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''),
-      'price-asc': (a, b) => a.price - b.price,
-      'price-desc': (a, b) => b.price - a.price,
-      rating: (a, b) => (b.rating || 0) - (a.rating || 0),
-      popular: (a, b) => (b.sold || 0) - (a.sold || 0),
-    };
-    items.sort(sorters[sort] || sorters.newest);
+    const [total, items] = await Promise.all([
+      col.products().countDocuments(filter),
+      col.products()
+        .find(filter)
+        .sort({ ...(SORTS[sort] || SORTS.newest), _id: -1 })
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .toArray(),
+    ]);
 
-    const total = items.length;
-    res.json({
-      products: items.slice((page - 1) * limit, page * limit),
-      total,
-      page,
-      pages: Math.max(1, Math.ceil(total / limit)),
-    });
+    res.json({ products: toDocs(items), total, page, pages: Math.max(1, Math.ceil(total / limit)) });
   })
 );
 
@@ -106,26 +109,23 @@ router.get(
 router.get(
   '/:idOrSlug',
   asyncHandler(async (req, res) => {
-    let product = docData(await col.products().doc(req.params.idOrSlug).get());
-    if (!product) {
-      const snap = await col.products().where('slug', '==', req.params.idOrSlug).limit(1).get();
-      if (!snap.empty) product = { id: snap.docs[0].id, ...snap.docs[0].data() };
-    }
+    const product = await findProduct(req.params.idOrSlug);
     if (!product || product.sellerActive === false) throw new ApiError(404, 'Product not found');
 
-    const [reviewsSnap, relatedSnap, category, sellerDoc] = await Promise.all([
-      col.reviews().where('productId', '==', product.id).get(),
-      col.products().where('categoryId', '==', product.categoryId || '').limit(12).get(),
-      product.categoryId ? col.categories().doc(product.categoryId).get().then(docData) : null,
-      product.sellerId ? col.users().doc(product.sellerId).get().then(docData) : null,
+    const [reviews, related, category, sellerDoc] = await Promise.all([
+      col.reviews().find({ productId: product.id }).sort({ createdAt: -1 }).toArray(),
+      col.products()
+        .find({ ...VISIBLE, categoryId: product.categoryId || '', _id: { $ne: oid(product.id) } })
+        .limit(8)
+        .toArray(),
+      product.categoryId ? findById(col.categories(), product.categoryId) : null,
+      product.sellerId ? findById(col.users(), product.sellerId) : null,
     ]);
-    const reviews = snapData(reviewsSnap).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-    const related = snapData(relatedSnap).filter((p) => p.id !== product.id && visible(p)).slice(0, 8);
     const seller = sellerDoc?.shop
       ? { id: sellerDoc.id, ownerName: sellerDoc.name, ...pick(sellerDoc.shop, ['name', 'slug', 'tagline', 'district', 'logo', 'craft', 'approvedAt']) }
       : null;
 
-    res.json({ product: { ...product, category }, seller, reviews, related });
+    res.json({ product: { ...product, category }, seller, reviews: toDocs(reviews), related: toDocs(related) });
   })
 );
 
@@ -155,17 +155,16 @@ router.post(
       createdAt: now(),
       updatedAt: now(),
     };
-    const ref = await col.products().add(data);
-    res.status(201).json({ product: { id: ref.id, ...data } });
+    const { insertedId } = await col.products().insertOne(data);
+    res.status(201).json({ product: toDoc({ _id: insertedId, ...data }) });
   })
 );
 
 async function ownedProduct(req) {
-  const ref = col.products().doc(req.params.id);
-  const product = docData(await ref.get());
+  const product = await findById(col.products(), req.params.id);
   if (!product) throw new ApiError(404, 'Product not found');
   if (req.user.role !== 'admin' && product.sellerId !== req.user.id) throw new ApiError(403, 'Not your product');
-  return { ref, product };
+  return product;
 }
 
 router.put(
@@ -173,14 +172,14 @@ router.put(
   protect,
   canSell,
   asyncHandler(async (req, res) => {
-    const { ref, product } = await ownedProduct(req);
+    const product = await ownedProduct(req);
     const isAdmin = req.user.role === 'admin';
     const updates = { ...normalize(req.body, isAdmin), updatedAt: now() };
     if (isAdmin && updates.sellerId !== undefined && updates.sellerId !== product.sellerId) {
       Object.assign(updates, await shopInfo(updates.sellerId));
     }
-    await ref.update(updates);
-    res.json({ product: docData(await ref.get()) });
+    await col.products().updateOne({ _id: oid(product.id) }, { $set: updates });
+    res.json({ product: await findById(col.products(), product.id) });
   })
 );
 
@@ -189,8 +188,8 @@ router.delete(
   protect,
   canSell,
   asyncHandler(async (req, res) => {
-    const { ref } = await ownedProduct(req);
-    await ref.delete();
+    const product = await ownedProduct(req);
+    await col.products().deleteOne({ _id: oid(product.id) });
     res.json({ message: 'Product deleted' });
   })
 );
@@ -202,20 +201,12 @@ router.post(
   asyncHandler(async (req, res) => {
     const rating = Number(req.body.rating);
     if (!(rating >= 1 && rating <= 5)) throw new ApiError(400, 'Rating must be between 1 and 5');
-    const productRef = col.products().doc(req.params.id);
-    const product = docData(await productRef.get());
+    const product = await findById(col.products(), req.params.id);
     if (!product) throw new ApiError(404, 'Product not found');
     if (product.sellerId === req.user.id) throw new ApiError(400, "You can't review your own product");
 
-    const existing = await col.reviews()
-      .where('productId', '==', req.params.id)
-      .where('userId', '==', req.user.id)
-      .limit(1)
-      .get();
-    if (!existing.empty) throw new ApiError(400, 'You already reviewed this product');
-
     const review = {
-      productId: req.params.id,
+      productId: product.id,
       sellerId: product.sellerId || '',
       userId: req.user.id,
       userName: req.user.name,
@@ -223,13 +214,23 @@ router.post(
       comment: (req.body.comment || '').trim(),
       createdAt: now(),
     };
-    const ref = await col.reviews().add(review);
+    let insertedId;
+    try {
+      ({ insertedId } = await col.reviews().insertOne(review));
+    } catch (e) {
+      if (e.code === 11000) throw new ApiError(400, 'You already reviewed this product');
+      throw e;
+    }
 
-    const all = snapData(await col.reviews().where('productId', '==', req.params.id).get());
-    const avg = all.reduce((s, r) => s + r.rating, 0) / all.length;
-    await productRef.update({ rating: Math.round(avg * 10) / 10, numReviews: all.length });
+    const [agg] = await col.reviews()
+      .aggregate([{ $match: { productId: product.id } }, { $group: { _id: null, avg: { $avg: '$rating' }, n: { $sum: 1 } } }])
+      .toArray();
+    await col.products().updateOne(
+      { _id: oid(product.id) },
+      { $set: { rating: Math.round(agg.avg * 10) / 10, numReviews: agg.n } }
+    );
 
-    res.status(201).json({ review: { id: ref.id, ...review } });
+    res.status(201).json({ review: toDoc({ _id: insertedId, ...review }) });
   })
 );
 

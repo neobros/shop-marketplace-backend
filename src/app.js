@@ -4,7 +4,7 @@ import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
 
-import './config/firebase.js';
+import { connectDB } from './config/db.js';
 import authRoutes from './routes/auth.js';
 import categoryRoutes from './routes/categories.js';
 import productRoutes from './routes/products.js';
@@ -32,7 +32,15 @@ app.use(express.json({ limit: '2mb' }));
 app.use(morgan(process.env.VERCEL ? 'tiny' : 'dev'));
 
 app.get('/', (_req, res) => res.json({ name: 'Ceylon Craft Collective API', health: '/api/health' }));
-app.get('/api/health', (_req, res) => res.json({ ok: true, time: new Date().toISOString() }));
+
+// Make sure MongoDB is connected before any API route runs (the connection is reused between requests).
+app.use('/api', (_req, _res, next) => connectDB().then(() => next(), next));
+
+app.get('/api/health', async (_req, res) => {
+  const db = await connectDB();
+  await db.command({ ping: 1 });
+  res.json({ ok: true, db: 'mongodb', time: new Date().toISOString() });
+});
 app.use('/api/auth', authRoutes);
 app.use('/api/categories', categoryRoutes);
 app.use('/api/products', productRoutes);
