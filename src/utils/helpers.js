@@ -16,8 +16,9 @@ export const signToken = (user) =>
 
 export const publicUser = (u) => {
   if (!u) return null;
-  const { password, ...rest } = u;
-  return rest;
+  const { password, googleId, ...rest } = u;
+  // Google sign-ups have no password until they set one in their profile
+  return { ...rest, hasPassword: !!password, googleLinked: !!googleId };
 };
 
 export const slugify = (s = '') =>

@@ -31,6 +31,12 @@ npm run dev               # http://localhost:5000
 | Seller (pending application) | jaffnapalmyrah@demo.lk | Seller@123 |
 | Customer | ayesha@demo.lk | Customer@123 |
 
+### Demo review dates
+Demo reviews are dated between about a week after the business opened (`BUSINESS_START`, default `2025-12-01`) and yesterday, at daytime hours in Sri Lanka, so they look like real reviews built up over time. To refresh only the review dates in an existing database:
+```bash
+npm run seed:review-dates   # changes demo review dates only; deletes nothing, real customers' reviews untouched
+```
+
 ### Removing the demo data
 ```bash
 npm run db:clear                              # preview: shows what would be deleted, deletes nothing
@@ -41,6 +47,26 @@ npm run db:clear:all-keep-categories          # same, but keep the craft categor
 Admin accounts are never deleted. Demo-only mode also removes the products, orders and reviews of the demo users. It also recognises demo data from older seeds that has no `demo` marker, by matching the seed's category slugs and banner titles. A category is kept if it still has real products.
 
 A plain `npm run seed` refuses to run when the database already has categories or products, so you can't get duplicates by seeding twice. Use `npm run seed:fresh` to replace the demo data. (Use these named scripts in PowerShell: it drops the `--` in `npm run seed -- --fresh`, so the flag never reaches the script.) Real accounts and anything created through the website are kept.
+
+## Google sign-in
+Customers and artisans can sign up or sign in with **Continue with Google**. The button returns a Google ID token. `POST /api/auth/google` verifies it with `google-auth-library` and returns the marketplace's own JWT, so it works exactly like an email login. Firebase Auth is not used.
+
+- **New email:** a new customer account is created with no password. The user can set one later under *My account → Set a password*.
+- **Email already registered:** Google is linked to that account, so both login methods work.
+- **Blocked users:** they stay blocked.
+- **Google-only accounts:** trying email + password shows a message telling the user to use Google.
+
+**Setup**
+1. In [Google Cloud Console](https://console.cloud.google.com/apis/credentials), open **APIs & Services → OAuth consent screen**. Set it up as **External**, with the app name *Ceylon Craft Collective*, your support email and your logo, then publish it.
+2. Go to **Credentials → Create credentials → OAuth client ID → Web application**.
+   - **Authorized JavaScript origins:** `http://localhost`, `http://localhost:5173`, and your live site URL, e.g. `https://ceylon-craft.vercel.app` (no trailing slash).
+   - No redirect URIs are needed.
+3. Copy the **Client ID** (`…apps.googleusercontent.com`) into **both** places:
+   - backend `.env` and Vercel: `GOOGLE_CLIENT_ID=…`
+   - frontend `.env` and Vercel: `VITE_GOOGLE_CLIENT_ID=…`
+4. Restart or redeploy both projects. If the frontend value is empty, the Google button is simply hidden.
+
+**Google-only mode:** set `GOOGLE_ONLY=true` here, and `VITE_GOOGLE_ONLY=true` in the frontend, to make Google the only way to create an account. `POST /api/auth/register` then returns 403. Email login keeps working, so the admin and older password accounts can still sign in, and admins can still create staff accounts from the admin panel.
 
 ## Privacy: artisans' contact details
 Customers must order through the marketplace, so the API never sends an artisan's phone number or full name to the public site. Only the first name is shown. Admins still see full details in the admin panel.
