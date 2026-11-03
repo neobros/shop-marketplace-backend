@@ -11,6 +11,7 @@ import { closeDB, col, connectDB, oid } from '../config/db.js';
 import { COMMISSION_RATE, FREE_SHIPPING_OVER, SHIPPING_FLAT } from '../config/shop.js';
 import { slugify } from '../utils/helpers.js';
 import { CATEGORIES, SHOPS, PENDING_SHOP, P, BANNERS, REVIEWS } from './seed-data.js';
+import { reviewDate } from './review-dates.js';
 
 const fresh = process.argv.includes('--fresh');
 const iso = (daysAgo = 0) => new Date(Date.now() - daysAgo * 864e5).toISOString();
@@ -128,7 +129,7 @@ async function run() {
     products.push({ id: ref.id, ...data });
     for (const [k, [rating, comment]] of myReviews.entries()) {
       const cu = customers[(i + k) % customers.length];
-      await add(col.reviews(), { demo: true, productId: ref.id, sellerId: shop.id, userId: cu.id, userName: cu.name, rating, comment, createdAt: iso(i + k) });
+      await add(col.reviews(), { demo: true, productId: ref.id, sellerId: shop.id, userId: cu.id, userName: cu.name, rating, comment, createdAt: reviewDate(`${ref.id}|${cu.id}`) });
     }
   }
   console.log(`  ${products.length} products with reviews`);
