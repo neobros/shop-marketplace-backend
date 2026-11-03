@@ -13,6 +13,7 @@ async function createIndexes(database) {
   await Promise.all([
     database.collection('users').createIndexes([
       { key: { email: 1 }, unique: true },
+      { key: { googleId: 1 }, unique: true, partialFilterExpression: { googleId: { $type: 'string' } } },
       { key: { role: 1 } },
       { key: { 'shop.slug': 1 } },
     ]),
